@@ -1,0 +1,157 @@
+show stages;
+
+
+CREATE DATABASE IF NOT EXISTS uber_enterprise_db;
+CREATE SCHEMA IF NOT EXISTS uber_enterprise_db.operations;
+CREATE WAREHOUSE IF NOT EXISTS uber_wh WAREHOUSE_SIZE = 'X-SMALL' AUTO_SUSPEND = 60;
+
+USE DATABASE uber_enterprise_db;
+USE SCHEMA operations;
+USE WAREHOUSE uber_wh;
+
+
+
+CREATE OR REPLACE FILE FORMAT uber_json_format
+  TYPE = JSON;
+
+
+
+-- 2. Create the External Stage using explicit AWS Access Keys
+CREATE OR REPLACE STAGE uber_s3_stage_json
+  URL = 's3://snowflake-json-utk/raw_rides/'
+  CREDENTIALS = (
+    AWS_KEY_ID = '' 
+    AWS_SECRET_KEY = ''
+  )
+  FILE_FORMAT = uber_json_format;
+
+
+
+LIST @uber_s3_stage_json;
+
+
+CREATE OR REPLACE TABLE raw_rides_landing (
+    raw_file VARIANT,
+    ingested_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
+
+
+CREATE OR REPLACE PIPE uber_snowpipe
+  AUTO_INGEST = TRUE
+  AS
+  COPY INTO raw_rides_landing (raw_file)
+  FROM @uber_s3_stage_json
+  FILE_FORMAT = (FORMAT_NAME = 'uber_json_format');
+
+
+-- Create a stream to capture CDC data from the landing table
+CREATE OR REPLACE STREAM rides_stream ON TABLE raw_rides_landing;
+
+
+-- Target structured Silver table
+CREATE OR REPLACE TABLE silver_rides (
+    ride_id VARCHAR,
+    rider_id VARCHAR,
+    fare_amount FLOAT,
+    trip_timestamp TIMESTAMP_NTZ
+);
+
+-- If the source introduces a new column (Schema Update)
+ALTER TABLE silver_rides ADD COLUMN surge_multiplier FLOAT DEFAULT 1.0;
+
+
+CREATE OR REPLACE PROCEDURE process_uber_rides()
+RETURNS STRING
+LANGUAGE SQL
+AS
+$$
+BEGIN
+    -- Merge data captured by the stream into the Silver table
+    MERGE INTO silver_rides AS target
+    USING (
+        SELECT 
+            raw_file:ride_id::VARCHAR AS ride_id,
+            raw_file:rider_id::VARCHAR AS rider_id,
+            raw_file:fare_amount::FLOAT AS fare_amount,
+            raw_file:trip_timestamp::TIMESTAMP_NTZ AS trip_timestamp,
+            COALESCE(raw_file:surge_multiplier::FLOAT, 1.0) AS surge_multiplier
+        FROM rides_stream
+    ) AS source
+    ON target.ride_id = source.ride_id
+    WHEN MATCHED THEN
+        UPDATE SET 
+            target.fare_amount = source.fare_amount,
+            target.surge_multiplier = source.surge_multiplier
+    WHEN NOT MATCHED THEN
+        INSERT (ride_id, rider_id, fare_amount, trip_timestamp, surge_multiplier)
+        VALUES (source.ride_id, source.rider_id, source.fare_amount, source.trip_timestamp, source.surge_multiplier);
+
+    RETURN 'Uber rides processed successfully via Stored Procedure.';
+END;
+$$;
+
+
+CREATE OR REPLACE TASK process_uber_stream_task
+  WAREHOUSE = uber_wh
+  SCHEDULE = '1 MINUTE'
+  WHEN SYSTEM$STREAM_HAS_DATA('rides_stream')
+AS
+  CALL process_uber_rides();
+
+-- Activate the task tree
+ALTER TASK process_uber_stream_task RESUME;
+
+
+
+DESCRIBE PIPE uber_snowpipe;
+
+
+select * from raw_rides_landing
+
+select * from UBER_ENTERPRISE_DB.OPERATIONS.GOLD_RIDER_METRICS
+
+select * from silver_rides
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+
+
