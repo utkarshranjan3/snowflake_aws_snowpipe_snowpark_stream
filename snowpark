@@ -1,0 +1,30 @@
+
+from snowflake.snowpark.context import get_active_session
+from snowflake.snowpark.functions import col, avg, sum as sum_
+
+# 1. Get the active Snowflake session
+session = get_active_session()
+
+# 2. Read Silver table
+silver_table = "UBER_ENTERPRISE_DB.OPERATIONS.SILVER_RIDES"
+df = session.table(silver_table)
+
+# 3. Aggregate metrics by rider
+metrics_df = (
+    df.group_by(col("RIDER_ID"))
+      .agg(
+          sum_(col("FARE_AMOUNT")).alias("TOTAL_SPENT"),
+          avg(col("SURGE_MULTIPLIER")).alias("AVG_SURGE")
+      )
+)
+
+# 4. Display the results
+metrics_df.show()
+
+# 5. Write results to Gold table
+gold_table = "UBER_ENTERPRISE_DB.OPERATIONS.GOLD_RIDER_METRICS"
+
+metrics_df.write.mode("overwrite").save_as_table(gold_table)
+
+# 6. Verify that Gold was written successfully
+session.table(gold_table).show()
